@@ -1,42 +1,45 @@
-# Stale-K Routing: K as Index, V as Payload — Progress Log
+# DiT KV-Routing: Stale-K as a Unified Attention Index
 
-## Thesis
-In DiT/video-DiT attention, **K is a stable routing index, V is volatile payload**.
-Cache INT4-quantized stale K across diffusion steps to route sparse attention;
-compute only selected keys/values fresh. Unifies cache × quant × sparse —
-a combination the literature treats as mutually exclusive.
+## Paper thesis
+"K is a stable routing index, V is volatile payload." In video DiTs, attention
+scores computed from a stale (low-bit) K snapshot remain accurate enough for
+token selection across denoising steps, while V must be recomputed.
+A single stale int4 K cache can therefore serve THREE roles at once:
+  1. routing index for top-k sparse attention
+  2. importance score for KV eviction (AR / streaming)
+  3. quantized storage of the index itself
+No prior work unifies these: TempoKV (arXiv 2610.15324) quantizes K/V but does
+no sparsity; DeCoPrune evicts but does not quantize; ~30 sparse-attention
+papers (WaveAlign, AB-Attention, LoSA, ...) all compute masks from FRESH K.
 
-## Verified empirical findings
+## Experiment 1: DiT-XL/2-256 offline probe (DONE)
+- K-only reuse error (gap=1): 0.026 ~ feature-cache error 0.028
+- V reuse error: 0.23 (bad); K/V are 4-bit friendly, features are NOT
+- => asymmetry confirmed at image-DiT scale
 
-### DiT-XL/2 256x256 (offline probe + e2e, 64 paired imgs)
-- K-only reuse error (gap=1): 0.026 vs feature cache 0.028 — comparable.
-- V reuse ≈ attn_out reuse: ~0.23 error — bad.
-- K/V quant-friendly at 4bit; feature quant at 4bit catastrophic (0.24+).
-- e2e PSNR vs exact (50 steps, seed-paired):
-  - k2 (K-only, stride2): 28.8 / SSIM 0.981  ← beats feat2 (25.6) and kv2 (25.3)
-  - k4: 22.6 | k8: 18.6 | kq4 (INT4): 22.4 ≈ k4 | feat4: 20.5
+## Experiment 2: DiT-XL end-to-end (DONE, results/dit_xl/e2e_metrics.json)
+64 paired images, PSNR/SSIM vs exact:
+- K-only stride2: PSNR 28.8 / SSIM 0.981  (beats feat2 25.6/0.962, kv2 25.3/0.958)
+- k4: 22.6, k8: 18.6, int4-K(kq4): 22.4 ~= k4, feat4: 20.5
 
-### CogVideoX-2b (17.9k joint tokens, post-RoPE capture)
-- K drift 0.11/step vs V drift 0.06-0.09 (asymmetry persists post-RoPE).
-- Stale INT4-K top-k routing ≈ oracle (fresh K):
-  - coverage 97% @ r=0.5, 92% @ r=0.25
-  - mask IoU 0.73-0.83; near gap-immunity (coverage -2% gap1->10)
-  - masked recompute err 0.03 @ r=0.5
+## Experiment 3: CogVideoX-2b probe (DONE, results/cogvideox/analysis.json)
+17.9k joint-attention tokens, layers {8,22}, steps {5..45}, gaps {1,2,5,10}:
+- stale int4-K top-k routing ~= oracle fresh-K routing:
+  coverage 97% @ 50%, 92% @ 25%; mask IoU 0.73-0.83
+- gap-immune: coverage drops only ~2% from gap=1 to gap=10
+- masked recompute error 0.03 @ 50%
+- K drift 0.11/step vs V drift 0.06-0.09 (post-RoPE)
 
-### CogVideoX e2e (IN PROGRESS — /root/cogvid_e2e.py)
-Running: base | oracle r=0.5 | stale-int4 r=0.5 | stale-int4 r=0.25
-Same seed (generator seed=0), 50 steps, 49 frames, CogVideoX-2b.
-Metric: PSNR/SSIM vs base video.
+## Experiment 4: CogVideoX-2b END-TO-END (IN PROGRESS)
+Stale int4-K routed top-k sparse attention inside a real 50-step generation.
+Runs: oracle50 / stale50 / stale25 / stale10 vs dense base.
+Metric: PSNR/SSIM per frame vs base. Script: code/cogvid_e2e3.py
+Status: running on GPUs 1-4 (2026-11-03 ~07:30 CST).
 
-## Landscape check (arXiv, Nov 2026)
-- AR video KV cache + dLLM KV cache: RED OCEAN.
-- Bidirectional DiT K/V-level cross-step reuse: TRUE GAP — TeaCache/FORA
-  cache block features, never K/V.
-- RECAP (arXiv 2610.26244) couples sparse+cache for AR models — closest
-  competitor, cite it.
-
-## Next steps
-- [ ] Finish CogVideoX e2e table (this run)
-- [ ] Wan2.1-T2V-1.3B replication (smaller, RoPE variant)
-- [ ] Speedup measurement with real sparse kernel (flex_attn/block mask)
-- [ ] Multi-prompt FID/LPIPS sweep
+## Related work triage (2026-11-03)
+- StreamDiT (2507.03745): training-side streaming T2V, closed-source, not comparable
+- TempoKV: predictive KV quant for AR video; K-predictable/V-history asymmetry = our result
+- CORAL-KV, DeCoPrune, FlashForward, Memory Forcing: each covers ONE mechanism
+- UnStep: training-free causal-model accel; orthogonal to our index idea
+- GAP: unified index layer for bidirectional video DiTs, streaming-ification
+  of open models (CogVideoX / Wan2.1) remains open
